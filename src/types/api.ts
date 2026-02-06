@@ -32,7 +32,7 @@ export interface ColorWithUsage {
 }
 
 export interface DalleGeneration {
-  approach: "logo_centered" | "accent_wave" | "gradient";
+  approach: "logo_centered" | "accent_wave" | "gradient" | "og_extended";
   prompt: string;
   imageUrl: string | null;
   status: "pending" | "generating" | "complete" | "error";

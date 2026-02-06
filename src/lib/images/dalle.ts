@@ -299,6 +299,188 @@ async function generateWavePatternImage(accentColor: string): Promise<string> {
 }
 
 /**
+ * Approach 4: Extend OG image to square by sampling edge colors and creating a seamless extension
+ */
+async function generateOgExtendedImage(ogImageUrl: string): Promise<string> {
+  const buffer = await fetchImageBuffer(ogImageUrl);
+  if (!buffer) {
+    throw new Error("Failed to fetch OG image");
+  }
+
+  const image = sharp(buffer);
+  const metadata = await image.metadata();
+  const width = metadata.width || 1200;
+  const height = metadata.height || 630;
+
+  // Target is 1160x1160 square
+  const targetSize = 1160;
+
+  if (width === height) {
+    // Already square, just resize
+    const result = await image.resize(targetSize, targetSize).png().toBuffer();
+    return `data:image/png;base64,${result.toString("base64")}`;
+  }
+
+  // Determine if we need to extend horizontally or vertically
+  const isWide = width > height;
+
+  // Get raw pixel data for edge sampling
+  const { data, info } = await image
+    .clone()
+    .raw()
+    .ensureAlpha()
+    .toBuffer({ resolveWithObject: true });
+
+  // Sample edge colors for extension
+  const sampleEdgeColors = (
+    rawData: Buffer,
+    imgWidth: number,
+    imgHeight: number,
+    channels: number,
+    edge: "top" | "bottom" | "left" | "right",
+    sampleDepth: number = 5
+  ): string[] => {
+    const colors: string[] = [];
+
+    if (edge === "top" || edge === "bottom") {
+      const y = edge === "top" ? 0 : imgHeight - 1;
+      for (let x = 0; x < imgWidth; x += Math.max(1, Math.floor(imgWidth / 20))) {
+        let r = 0, g = 0, b = 0, count = 0;
+        for (let dy = 0; dy < sampleDepth && (edge === "top" ? dy < imgHeight : y - dy >= 0); dy++) {
+          const sampleY = edge === "top" ? dy : y - dy;
+          const idx = (sampleY * imgWidth + x) * channels;
+          r += rawData[idx];
+          g += rawData[idx + 1];
+          b += rawData[idx + 2];
+          count++;
+        }
+        if (count > 0) {
+          colors.push(`rgb(${Math.round(r / count)}, ${Math.round(g / count)}, ${Math.round(b / count)})`);
+        }
+      }
+    } else {
+      const x = edge === "left" ? 0 : imgWidth - 1;
+      for (let y = 0; y < imgHeight; y += Math.max(1, Math.floor(imgHeight / 20))) {
+        let r = 0, g = 0, b = 0, count = 0;
+        for (let dx = 0; dx < sampleDepth && (edge === "left" ? dx < imgWidth : x - dx >= 0); dx++) {
+          const sampleX = edge === "left" ? dx : x - dx;
+          const idx = (y * imgWidth + sampleX) * channels;
+          r += rawData[idx];
+          g += rawData[idx + 1];
+          b += rawData[idx + 2];
+          count++;
+        }
+        if (count > 0) {
+          colors.push(`rgb(${Math.round(r / count)}, ${Math.round(g / count)}, ${Math.round(b / count)})`);
+        }
+      }
+    }
+    return colors;
+  };
+
+  // Calculate extension needed
+  let newWidth: number, newHeight: number, offsetX: number, offsetY: number;
+  let topColors: string[] = [], bottomColors: string[] = [];
+  let leftColors: string[] = [], rightColors: string[] = [];
+
+  if (isWide) {
+    // Image is wider than tall - extend top and bottom
+    const scaleFactor = targetSize / width;
+    const scaledHeight = Math.round(height * scaleFactor);
+    const extensionNeeded = targetSize - scaledHeight;
+    const topExtension = Math.floor(extensionNeeded / 2);
+    const bottomExtension = extensionNeeded - topExtension;
+
+    newWidth = targetSize;
+    newHeight = targetSize;
+    offsetX = 0;
+    offsetY = topExtension;
+
+    // Sample top and bottom edges
+    topColors = sampleEdgeColors(data, info.width, info.height, info.channels, "top", 10);
+    bottomColors = sampleEdgeColors(data, info.width, info.height, info.channels, "bottom", 10);
+
+    // Create gradient strips for top and bottom
+    const avgTopColor = topColors.length > 0 ? topColors[Math.floor(topColors.length / 2)] : "rgb(128,128,128)";
+    const avgBottomColor = bottomColors.length > 0 ? bottomColors[Math.floor(bottomColors.length / 2)] : "rgb(128,128,128)";
+
+    // Resize original image
+    const resizedImage = await image.resize(targetSize, scaledHeight).png().toBuffer();
+
+    // Create SVG with gradient extensions
+    const svg = `
+      <svg width="${targetSize}" height="${targetSize}" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="topGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+            ${topColors.map((c, i) => `<stop offset="${(i / Math.max(1, topColors.length - 1)) * 100}%" style="stop-color:${c};stop-opacity:1" />`).join("")}
+          </linearGradient>
+          <linearGradient id="bottomGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+            ${bottomColors.map((c, i) => `<stop offset="${(i / Math.max(1, bottomColors.length - 1)) * 100}%" style="stop-color:${c};stop-opacity:1" />`).join("")}
+          </linearGradient>
+        </defs>
+        <rect x="0" y="0" width="${targetSize}" height="${topExtension + 10}" fill="url(#topGrad)"/>
+        <rect x="0" y="${targetSize - bottomExtension - 10}" width="${targetSize}" height="${bottomExtension + 10}" fill="url(#bottomGrad)"/>
+      </svg>
+    `;
+
+    const gradientBuffer = await sharp(Buffer.from(svg)).png().toBuffer();
+
+    // Composite: gradient background + resized image
+    const result = await sharp(gradientBuffer)
+      .composite([{ input: resizedImage, top: offsetY, left: 0 }])
+      .png()
+      .toBuffer();
+
+    return `data:image/png;base64,${result.toString("base64")}`;
+  } else {
+    // Image is taller than wide - extend left and right
+    const scaleFactor = targetSize / height;
+    const scaledWidth = Math.round(width * scaleFactor);
+    const extensionNeeded = targetSize - scaledWidth;
+    const leftExtension = Math.floor(extensionNeeded / 2);
+    const rightExtension = extensionNeeded - leftExtension;
+
+    newWidth = targetSize;
+    newHeight = targetSize;
+    offsetX = leftExtension;
+    offsetY = 0;
+
+    // Sample left and right edges
+    leftColors = sampleEdgeColors(data, info.width, info.height, info.channels, "left", 10);
+    rightColors = sampleEdgeColors(data, info.width, info.height, info.channels, "right", 10);
+
+    // Resize original image
+    const resizedImage = await image.resize(scaledWidth, targetSize).png().toBuffer();
+
+    // Create SVG with gradient extensions
+    const svg = `
+      <svg width="${targetSize}" height="${targetSize}" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="leftGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+            ${leftColors.map((c, i) => `<stop offset="${(i / Math.max(1, leftColors.length - 1)) * 100}%" style="stop-color:${c};stop-opacity:1" />`).join("")}
+          </linearGradient>
+          <linearGradient id="rightGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+            ${rightColors.map((c, i) => `<stop offset="${(i / Math.max(1, rightColors.length - 1)) * 100}%" style="stop-color:${c};stop-opacity:1" />`).join("")}
+          </linearGradient>
+        </defs>
+        <rect x="0" y="0" width="${leftExtension + 10}" height="${targetSize}" fill="url(#leftGrad)"/>
+        <rect x="${targetSize - rightExtension - 10}" y="0" width="${rightExtension + 10}" height="${targetSize}" fill="url(#rightGrad)"/>
+      </svg>
+    `;
+
+    const gradientBuffer = await sharp(Buffer.from(svg)).png().toBuffer();
+
+    // Composite: gradient background + resized image
+    const result = await sharp(gradientBuffer)
+      .composite([{ input: resizedImage, top: 0, left: offsetX }])
+      .png()
+      .toBuffer();
+
+    return `data:image/png;base64,${result.toString("base64")}`;
+  }
+}
+
+/**
  * Approach 3: Gradient from extracted colors
  */
 async function generateGradientImage(colors: string[]): Promise<string> {
@@ -405,6 +587,13 @@ export function getGradientPrompt(colors: string[]): string {
 }
 
 /**
+ * Description for Approach 4
+ */
+export function getOgExtendedPrompt(): string {
+  return `OG image extended to square by sampling edge colors.`;
+}
+
+/**
  * Generate the gradient image (exported for use as login/social image)
  */
 export async function generateGradientImagePublic(colors: string[]): Promise<string> {
@@ -412,13 +601,14 @@ export async function generateGradientImagePublic(colors: string[]): Promise<str
 }
 
 /**
- * Generate all three image approaches (all deterministic, no AI)
+ * Generate all four image approaches (all deterministic, no AI)
  */
 export async function generateAllDalleImages(
   colors: PortalColorScheme,
   companyName: string,
   scrapedImages: ScrapedImageInfo[],
-  logoCenteredInput: LogoCenteredInput
+  logoCenteredInput: LogoCenteredInput,
+  ogImageUrl?: string | null
 ): Promise<DalleGeneration[]> {
   // Extract background color from logo (preferred) or icon
   const imageForBackground = logoCenteredInput.logoUrl || logoCenteredInput.iconUrl;
@@ -456,8 +646,18 @@ export async function generateAllDalleImages(
     },
   ];
 
+  // Add 4th approach only if OG image is available
+  if (ogImageUrl) {
+    generations.push({
+      approach: "og_extended",
+      prompt: getOgExtendedPrompt(),
+      imageUrl: null,
+      status: "pending",
+    });
+  }
+
   // Generate all images in parallel
-  const results = await Promise.allSettled([
+  const imagePromises = [
     (async () => {
       try {
         const imageUrl = await generateLogoCenteredImage(
@@ -489,7 +689,24 @@ export async function generateAllDalleImages(
         return { ...generations[2], status: "error" as const, error: errorMessage };
       }
     })(),
-  ]);
+  ];
+
+  // Add 4th approach generation if OG image is available
+  if (ogImageUrl) {
+    imagePromises.push(
+      (async () => {
+        try {
+          const imageUrl = await generateOgExtendedImage(ogImageUrl);
+          return { ...generations[3], imageUrl, status: "complete" as const };
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : "Unknown error";
+          return { ...generations[3], status: "error" as const, error: errorMessage };
+        }
+      })()
+    );
+  }
+
+  const results = await Promise.allSettled(imagePromises);
 
   return results.map((result, index) => {
     if (result.status === "fulfilled") {
@@ -511,7 +728,8 @@ export async function generateDalleForApproach(
   colors: PortalColorScheme,
   companyName: string,
   scrapedImages: ScrapedImageInfo[],
-  logoCenteredInput?: LogoCenteredInput
+  logoCenteredInput?: LogoCenteredInput,
+  ogImageUrl?: string | null
 ): Promise<DalleGeneration> {
   try {
     switch (approach) {
@@ -554,6 +772,18 @@ export async function generateDalleForApproach(
         return {
           approach,
           prompt: getGradientPrompt(finalColors),
+          imageUrl,
+          status: "complete",
+        };
+      }
+      case "og_extended": {
+        if (!ogImageUrl) {
+          throw new Error("OG image URL is required for og_extended approach");
+        }
+        const imageUrl = await generateOgExtendedImage(ogImageUrl);
+        return {
+          approach,
+          prompt: getOgExtendedPrompt(),
           imageUrl,
           status: "complete",
         };

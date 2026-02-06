@@ -17,6 +17,7 @@ import {
   getLogoCenteredPrompt,
   getAccentWavePrompt,
   getGradientPrompt,
+  getOgExtendedPrompt,
   LogoCenteredInput,
   generateGradientImagePublic,
   extractColorsFromScrapedImages,
@@ -134,6 +135,16 @@ export async function POST(request: NextRequest) {
           },
         ];
 
+        // Add 4th approach if OG image is available
+        if (scrapedData.ogImage) {
+          initialDalleGenerations.push({
+            approach: "og_extended",
+            prompt: getOgExtendedPrompt(),
+            imageUrl: null,
+            status: "pending",
+          });
+        }
+
         // Send colors and basic data event
         controller.enqueue(encoder.encode(createSSEMessage({
           type: "colors",
@@ -237,9 +248,10 @@ export async function POST(request: NextRequest) {
 
         // Generate all image approaches (deterministic, no AI)
         if (isOpenAIConfigured()) {
+          const approachCount = scrapedData.ogImage ? 4 : 3;
           controller.enqueue(encoder.encode(createSSEMessage({
             type: "dalle",
-            message: "Generating images (3 approaches)...",
+            message: `Generating images (${approachCount} approaches)...`,
             rawOutputs: {
               dalleGenerations: dalleGenerations.map(g => ({ ...g, status: "generating" as const })),
             },
@@ -250,7 +262,8 @@ export async function POST(request: NextRequest) {
               colors,
               companyName,
               scrapedImagesInfo,
-              logoCenteredInput
+              logoCenteredInput,
+              scrapedData.ogImage
             );
 
             // Find the gradient generation (approach 3) for login image
